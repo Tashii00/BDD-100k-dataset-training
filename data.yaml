@@ -1,0 +1,13 @@
+path: ./dataset
+train: images/train
+val: images/val
+
+nc: 7
+names:
+  0: car
+  1: traffic sign
+  2: traffic light
+  3: person
+  4: truck
+  5: bus
+  6: cyclist

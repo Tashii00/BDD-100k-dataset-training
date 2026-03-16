@@ -1,0 +1,39 @@
+cat > .gitignore << 'EOF'
+# ── Python ────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+
+# ── Large model files ─────────────────────
+*.pt
+*.onnx
+
+# ── Dataset & images ──────────────────────
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.tiff
+*.webp
+
+# ── Large JSON annotation files ───────────
+*.json
+
+# ── Dataset folders ───────────────────────
+dataset/
+dataset_balanced/
+BDD-100K-DATASET-TRAINING/
+
+# ── Training runs & logs ──────────────────
+runs/
+
+# ── Cache files ───────────────────────────
+*.cache
+
+# ── OS files ──────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── VS Code ───────────────────────────────
+.vscode/
+EOF
