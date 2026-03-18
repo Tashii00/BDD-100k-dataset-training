@@ -1,3 +1,4 @@
+import os
 import random
 import shutil
 from pathlib import Path
@@ -16,155 +17,117 @@ CLASS_NAMES = {
     4: "truck", 5: "bus", 6: "cyclist",
 }
 
-RARE_CLASSES    = {4, 5, 6}       # truck, bus, cyclist — never remove these images
-CAR_TARGET      = 167_000         # realistic floor — car is in nearly every scene
-CAR_DOMINANT_THRESHOLD = 0.70     # image flagged if car boxes > 70% of all boxes
-MIN_BOXES_TO_FLAG      = 3        # only flag images with at least this many boxes
-RANDOM_SEED     = 42
+# Increased targets — previous values were too aggressive
+# Car/traffic sign/traffic light/person were underrepresented → low recall
+BOX_TARGETS = {
+    0: 150_000,  # car          — was 80k, caused 20k background FN
+    1: 100_000,  # traffic sign — was 70k
+    2: 100_000,  # traffic light — was 60k, only 8% recall!
+    3: 100_000,  # person       — was 60k
+    4: None,     # truck        → keep all
+    5: None,     # bus          → keep all
+    6: None,     # cyclist      → keep all
+}
+
+RANDOM_SEED = 42
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 
 def main():
     random.seed(RANDOM_SEED)
 
+    # Clean old output
+    if OUT_IMGS.exists():
+        shutil.rmtree(OUT_IMGS)
+    if OUT_LABELS.exists():
+        shutil.rmtree(OUT_LABELS)
+
     label_files = sorted(SRC_LABELS.glob("*.txt"))
     print(f"Label files found: {len(label_files):,}\n")
 
-    # ── Step 1: Load all labels ───────────────────────────────────────────────
-    all_labels = {}   # stem → list of lines
+    # ── Step 1: Load all labels + collect box refs per class ─────────────────
+    all_labels = {}
+    box_refs   = {cid: [] for cid in BOX_TARGETS}
+
     for lf in label_files:
         lines = [l.strip() for l in lf.read_text().splitlines() if l.strip()]
         all_labels[lf.stem] = lines
+        for i, line in enumerate(lines):
+            cid = int(line.split()[0])
+            if cid in box_refs:
+                box_refs[cid].append((lf.stem, i))
 
-    # ── Step 2: Separate rare-containing vs car-dominant images ──────────────
-    protected  = []   # contains any rare class → always keep
-    flaggable  = []   # car-dominant, no rare class → candidate for removal
-    neutral    = []   # mixed but not car-dominant → always keep
+    # ── Step 2: Print counts + decide what to remove ─────────────────────────
+    print(f"  {'Class':<20} {'Found':>10}  {'Target':>10}  {'Remove':>10}")
+    print("  " + "-" * 54)
 
-    for stem, lines in all_labels.items():
-        if not lines:
-            neutral.append(stem)
-            continue
+    to_remove = set()
 
-        class_ids = [int(l.split()[0]) for l in lines]
-        counts    = Counter(class_ids)
-        total     = len(lines)
-        car_frac  = counts.get(0, 0) / total
-        has_rare  = any(cid in RARE_CLASSES for cid in counts)
+    for cid in range(7):
+        found  = len(box_refs.get(cid, []))
+        target = BOX_TARGETS.get(cid)
 
-        if has_rare:
-            protected.append(stem)
-        elif total >= MIN_BOXES_TO_FLAG and car_frac >= CAR_DOMINANT_THRESHOLD:
-            flaggable.append(stem)
+        if target is None or found <= target:
+            print(f"  {CLASS_NAMES[cid]:<20} {found:>10,}  {'keep all':>10}  {'0':>10}")
         else:
-            neutral.append(stem)
+            remove = found - target
+            refs   = box_refs[cid]
+            random.shuffle(refs)
+            for stem, line_idx in refs[target:]:
+                to_remove.add((stem, line_idx))
+            print(f"  {CLASS_NAMES[cid]:<20} {found:>10,}  {target:>10,}  {remove:>10,}")
 
-    print(f"  Protected  (rare class present):  {len(protected):,}  → never removed")
-    print(f"  Neutral    (mixed, no rare):       {len(neutral):,}   → always kept")
-    print(f"  Flaggable  (car-dominant):         {len(flaggable):,}  → candidates for removal\n")
+    print(f"\n  Total annotations to remove: {len(to_remove):,}\n")
 
-    # ── Step 3: Count car boxes in current set ───────────────────────────────
-    def count_cars(stems):
-        total = 0
-        for stem in stems:
-            for line in all_labels.get(stem, []):
-                if int(line.split()[0]) == 0:
-                    total += 1
-        return total
-
-    car_in_protected = count_cars(protected)
-    car_in_neutral   = count_cars(neutral)
-    car_in_flaggable = count_cars(flaggable)
-    total_car        = car_in_protected + car_in_neutral + car_in_flaggable
-
-    print(f"  Car boxes in protected images:  {car_in_protected:,}")
-    print(f"  Car boxes in neutral images:    {car_in_neutral:,}")
-    print(f"  Car boxes in flaggable images:  {car_in_flaggable:,}")
-    print(f"  Total car boxes:                {total_car:,}")
-    print(f"  Target car boxes:               {CAR_TARGET:,}\n")
-
-    # ── Step 4: Check if removal is even possible ────────────────────────────
-    min_possible = car_in_protected + car_in_neutral
-    if min_possible > CAR_TARGET:
-        print(f"  WARNING: Even removing ALL flaggable images gives {min_possible:,} car boxes.")
-        print(f"  Target {CAR_TARGET:,} is unreachable. Removing all flaggable images.\n")
-        kept_flaggable = []
-    elif total_car <= CAR_TARGET:
-        print(f"  Already at or below target — keeping all flaggable images.\n")
-        kept_flaggable = flaggable
-    else:
-        # How many car boxes to shed from flaggable pool
-        need_to_shed = total_car - CAR_TARGET
-
-        # Sort flaggable by car box count descending — remove car-heaviest first
-        flaggable_with_counts = [
-            (stem, sum(1 for l in all_labels[stem] if int(l.split()[0]) == 0))
-            for stem in flaggable
-        ]
-        flaggable_with_counts.sort(key=lambda x: x[1], reverse=True)
-
-        shed = 0
-        removed = set()
-        for stem, car_count in flaggable_with_counts:
-            if shed >= need_to_shed:
-                break
-            removed.add(stem)
-            shed += car_count
-
-        kept_flaggable = [s for s in flaggable if s not in removed]
-        print(f"  Removing {len(removed):,} car-dominant images (shed {shed:,} car boxes)")
-        print(f"  Keeping  {len(kept_flaggable):,} flaggable images\n")
-
-    # ── Step 5: Write output ──────────────────────────────────────────────────
+    # ── Step 3: Write output ──────────────────────────────────────────────────
     OUT_IMGS.mkdir(parents=True, exist_ok=True)
     OUT_LABELS.mkdir(parents=True, exist_ok=True)
 
-    final_stems  = protected + neutral + kept_flaggable
     final_counts = Counter()
     imgs_written = 0
 
-    for stem in final_stems:
-        lines = all_labels.get(stem, [])
+    for lf in label_files:
+        stem  = lf.stem
+        lines = all_labels[stem]
 
-        # Find image file
-        src_img = None
-        for ext in [".jpg", ".jpeg", ".png"]:
-            candidate = SRC_IMGS / (stem + ext)
-            if candidate.exists():
-                src_img = candidate
-                break
-        if src_img is None:
-            continue
-
-        shutil.copy2(src_img, OUT_IMGS / src_img.name)
-        (OUT_LABELS / (stem + ".txt")).write_text("\n".join(lines))
-
-        for line in lines:
+        new_lines = []
+        for i, line in enumerate(lines):
+            if (stem, i) in to_remove:
+                continue
+            new_lines.append(line)
             final_counts[int(line.split()[0])] += 1
+
+        (OUT_LABELS / lf.name).write_text("\n".join(new_lines))
+
+        for ext in [".jpg", ".jpeg", ".png"]:
+            src_img = SRC_IMGS / (stem + ext)
+            if src_img.exists():
+                shutil.copy2(src_img, OUT_IMGS / src_img.name)
+                break
+
         imgs_written += 1
 
     # ── Report ────────────────────────────────────────────────────────────────
     print(f"{'='*55}")
     print(f"  FINAL CLASS DISTRIBUTION (train_final)")
     print(f"{'='*55}")
-    cyclist_cnt = final_counts.get(6, 1)
+    max_cnt = max(final_counts.values(), default=1)
     for cid in range(7):
         name  = CLASS_NAMES[cid]
         cnt   = final_counts.get(cid, 0)
-        ratio = f"{cnt/cyclist_cnt:.1f}x"
-        bar   = "█" * min(30, int(30 * cnt / max(final_counts.values(), default=1)))
-        print(f"  {cid} {name:<20} {cnt:>10,}  {ratio:>10}  {bar}")
+        bar   = "█" * min(30, int(30 * cnt / max_cnt))
+        print(f"  {cid} {name:<20} {cnt:>10,}  {bar}")
 
     print(f"\n  Images written : {imgs_written:,}")
-    print(f"  Labels written : {imgs_written:,}")
 
-    # ── Save yaml ─────────────────────────────────────────────────────────────
-    Path("data_final.yaml").write_text(
-        "path: ./dataset_balanced\n"
-        "train: images/train_final\n"
-        "val: images/val\n\n"
-        "nc: 7\n"
-        "names:\n" +
+    # ── Update data_final.yaml ────────────────────────────────────────────────
+    yaml_path = Path("data_final.yaml")
+    yaml_path.write_text(
+        f"path: ./dataset_balanced\n"
+        f"train: images/train_final\n"
+        f"val: images/val\n\n"
+        f"nc: 7\n"
+        f"names:\n" +
         "".join(f"  {cid}: {name}\n" for cid, name in CLASS_NAMES.items())
     )
     print(f"  data_final.yaml saved")

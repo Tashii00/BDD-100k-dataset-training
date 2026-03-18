@@ -1,16 +1,15 @@
 """
 sampling.py — Professional Augmentation Pipeline
 =================================================
-5 distinct augmentation techniques (not just brightness copies):
-  0. Original        — clean baseline
+5 distinct augmentation techniques:
   1. Horizontal flip — mirror scene geometry
-  2. Perspective warp — simulate different camera angle / tilt
-  3. Motion blur      — camera shake or fast-moving subject
-  4. Rain simulation  — adverse weather condition
-  5. CLAHE            — low-light / tunnel / underexposed scene
+  2. Perspective warp — simulate different camera angle
+  3. Motion blur — camera shake or fast-moving subject
+  4. Rain simulation — adverse weather condition
+  5. CLAHE — low-light / tunnel / underexposed scene
 
-Only bike + rider are augmented (truly rare).
-Bus is NOT augmented — 8,993 images is sufficient.
+Rare classes augmented: bike + rider + bus
+Val set: 5,000 images (increased from 2,000)
 """
 
 import json
@@ -34,11 +33,12 @@ CLASSES = {
 }
 IMAGE_W, IMAGE_H = 1280, 720
 
-# Rare classes to oversample (use original category names from JSON)
-RARE_CLASSES = {"rider", "bike", "bus"}
-COMMON_LIMIT = 3_500  # max images per dominant class
-RARE_LIMIT   = 1_500  # max ORIGINAL images per rare class before augmentation
-                       # 1,500 × 5 augmentations = 7,500 per class max
+RARE_CLASSES  = {"bike", "rider", "bus"}
+RARE_LIMIT    = 3_000
+COMMON_LIMIT  = 4_000
+TOTAL_TARGET  = 45_000
+
+BASE = "/home/aliraza/BDD-100k-dataset-training/BDD-100K-DATASET-TRAINING/archive (8)"
 
 IMAGE_FOLDERS = {
     "train": [
@@ -58,7 +58,7 @@ CLASS_NAMES = {
     3: "person", 4: "truck", 5: "bus", 6: "cyclist",
 }
 
-# ── IMAGE FINDERS ─────────────────────────────────────────────────────────────
+# ── IMAGE FINDER ──────────────────────────────────────────────────────────────
 def find_image(img_name, split):
     for folder in IMAGE_FOLDERS[split]:
         path = os.path.join(folder, img_name)
@@ -69,14 +69,9 @@ def find_image(img_name, split):
 # ── AUGMENTATION FUNCTIONS ────────────────────────────────────────────────────
 
 def aug_flip(img):
-    """Horizontal flip — mirror the scene"""
     return cv2.flip(img, 1)
 
 def aug_perspective(img):
-    """
-    Perspective warp — simulates camera tilt or slight viewpoint change.
-    Moves corners randomly by up to 5% of image dimension.
-    """
     h, w = img.shape[:2]
     margin = 0.05
     dx = int(w * margin)
@@ -92,38 +87,23 @@ def aug_perspective(img):
     return cv2.warpPerspective(img, M, (w, h), borderMode=cv2.BORDER_REFLECT), M
 
 def aug_motion_blur(img):
-    """
-    Motion blur — simulates camera shake or fast-moving object.
-    Random direction: horizontal, diagonal left-right, diagonal right-left.
-    """
     kernel_size = random.choice([11, 15, 21])
     kernel      = np.zeros((kernel_size, kernel_size))
     direction   = random.choice(["horizontal", "diagonal_lr", "diagonal_rl"])
-
     if direction == "horizontal":
         kernel[kernel_size // 2, :] = 1.0
     elif direction == "diagonal_lr":
         np.fill_diagonal(kernel, 1.0)
     else:
         kernel = np.fliplr(np.eye(kernel_size))
-
     kernel /= kernel.sum()
     return cv2.filter2D(img, -1, kernel)
 
 def aug_rain(img):
-    """
-    Rain simulation — adds streaks + slight blur + darkening.
-    InSight must work outdoors in all weather conditions.
-    """
     img = img.copy()
     h, w = img.shape[:2]
-
-    # Darken — overcast sky
     img = cv2.convertScaleAbs(img, alpha=0.75, beta=0)
-
-    # Rain streaks
-    num_streaks = random.randint(300, 600)
-    for _ in range(num_streaks):
+    for _ in range(random.randint(300, 600)):
         x1     = random.randint(0, w)
         y1     = random.randint(0, h)
         length = random.randint(10, 25)
@@ -131,16 +111,9 @@ def aug_rain(img):
         x2     = int(x1 + length * math.sin(math.radians(angle)))
         y2     = int(y1 + length * math.cos(math.radians(angle)))
         cv2.line(img, (x1, y1), (x2, y2), (200, 200, 200), 1, cv2.LINE_AA)
-
-    # Wet lens blur
     return cv2.GaussianBlur(img, (3, 3), 0)
 
 def aug_clahe(img):
-    """
-    CLAHE — low-light / tunnel / underexposed scene.
-    Enhances local contrast per region — simulates going from sunlight
-    into shade, underpass, or indoor corridor (common for blind users).
-    """
     img   = cv2.convertScaleAbs(img, alpha=0.5, beta=0)
     lab   = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
@@ -176,10 +149,9 @@ def labels_perspective(lines, M, img_w=1280, img_h=720):
     return result
 
 def labels_unchanged(lines):
-    """Motion blur, rain, CLAHE don't move objects"""
     return [l for l in lines if l.strip()]
 
-# ── CONVERT JSON ITEM → YOLO LINES ───────────────────────────────────────────
+# ── JSON ITEM → YOLO LINES ────────────────────────────────────────────────────
 
 def item_to_label_lines(item):
     lines = []
@@ -201,20 +173,15 @@ def item_to_label_lines(item):
 def apply_aug(img, base_lines, aug_name):
     if aug_name == "flip":
         return aug_flip(img), labels_flip(base_lines)
-
     elif aug_name == "perspective":
         aug_img, M = aug_perspective(img)
         return aug_img, labels_perspective(base_lines, M)
-
     elif aug_name == "motion_blur":
         return aug_motion_blur(img), labels_unchanged(base_lines)
-
     elif aug_name == "rain":
         return aug_rain(img), labels_unchanged(base_lines)
-
     elif aug_name == "clahe":
         return aug_clahe(img), labels_unchanged(base_lines)
-
     return img, base_lines
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
@@ -227,7 +194,6 @@ label_path = f"{BASE}/bdd100k_labels_release/bdd100k/labels/bdd100k_labels_image
 with open(label_path) as f:
     data = json.load(f)
 
-# Group images by class
 rare_images   = defaultdict(list)
 common_images = defaultdict(list)
 
@@ -251,7 +217,7 @@ print(f"  {'TOTAL':<20} {sum(len(v) for v in common_images.values()):>6,}")
 
 print("\nRare class counts (before aug):")
 for cls in RARE_CLASSES:
-    print(f"  {cls:<20} {len(rare_images[cls]):>6,} → ×6 (orig+5 aug) = {min(len(rare_images[cls]),RARE_LIMIT)*6:,}")
+    print(f"  {cls:<20} {len(rare_images[cls]):>6,} → ×6 = {min(len(rare_images[cls]),RARE_LIMIT)*6:,}")
 
 out_labels = Path("dataset_balanced/labels/train")
 out_images = Path("dataset_balanced/images/train")
@@ -261,10 +227,9 @@ out_images.mkdir(parents=True, exist_ok=True)
 saved         = 0
 class_counter = Counter()
 rare_seen     = set()
+AUG_NAMES     = ["flip", "perspective", "motion_blur", "rain", "clahe"]
 
-AUG_NAMES = ["flip", "perspective", "motion_blur", "rain", "clahe"]
-
-print("\n--- Augmenting rare classes (bike + rider) ---")
+print("\n--- Augmenting rare classes ---")
 for cat in RARE_CLASSES:
     random.shuffle(rare_images[cat])
     for item in rare_images[cat][:RARE_LIMIT]:
@@ -284,7 +249,6 @@ for cat in RARE_CLASSES:
         stem       = Path(img_name).stem
         ext        = Path(img_name).suffix
 
-        # Save original
         shutil.copy2(img_path, out_images / img_name)
         with open(out_labels / f"{stem}.txt", "w") as f:
             f.write("\n".join(base_lines))
@@ -292,7 +256,6 @@ for cat in RARE_CLASSES:
             class_counter[int(line.split()[0])] += 1
         saved += 1
 
-        # Save 5 augmented versions — each a different technique
         for aug_name in AUG_NAMES:
             aug_img, aug_lines = apply_aug(img.copy(), base_lines, aug_name)
             cv2.imwrite(str(out_images / f"{stem}_{aug_name}{ext}"), aug_img)
@@ -307,7 +270,6 @@ for cat in RARE_CLASSES:
 
 print(f"\nAfter rare augmentation: {saved:,} images")
 
-# Fill with common images
 print("\n--- Adding common class images ---")
 all_common = []
 for cat, items in common_images.items():
@@ -336,7 +298,6 @@ for item in all_common:
         class_counter[int(line.split()[0])] += 1
     saved += 1
 
-# ── TRAIN REPORT ──────────────────────────────────────────────────────────────
 print(f"\n{'='*42}")
 print(f"  TRAIN FINAL: {saved:,} images")
 print(f"{'='*42}")
@@ -345,8 +306,8 @@ print(f"  {'-'*37}")
 for cid in range(7):
     print(f"  {CLASS_NAMES[cid]:<25} {class_counter.get(cid,0):>10,}")
 
-# ── VAL (always clean, no augmentation) ───────────────────────────────────────
-print("\n--- Processing val (clean, no augmentation) ---")
+# ── VAL — increased to 5,000 ──────────────────────────────────────────────────
+print("\n--- Processing val (5,000 images — increased from 2,000) ---")
 val_label_path = f"{BASE}/bdd100k_labels_release/bdd100k/labels/bdd100k_labels_images_val_cleaned.json"
 with open(val_label_path) as f:
     val_data = json.load(f)
@@ -361,7 +322,7 @@ val_saved   = 0
 val_counter = Counter()
 
 for item in val_data:
-    if val_saved >= 2_000:
+    if val_saved >= 5_000:    # increased from 2,000
         break
     img_name = item["name"]
     img_path = find_image(img_name, "val")

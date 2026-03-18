@@ -8,25 +8,18 @@ if __name__ == "__main__":
     from ultralytics.models.yolo.detect import DetectionTrainer
     from ultralytics.utils.loss import v8DetectionLoss
 
-    # ── Box counts from undersample.py output (train_final) ───────────────────
     box_counts = torch.tensor([
-        166_997,  # 0 car
-         84_574,  # 1 traffic sign
-         78_605,  # 2 traffic light
-         58_978,  # 3 person
-         10_304,  # 4 truck
-          7_795,  # 5 bus
-         18_625,  # 6 cyclist
+         150_000,  # 0 car
+         100_000,  # 1 traffic sign
+         100_000,  # 2 traffic light
+         100_000,  # 3 person
+          24_601,  # 4 truck
+          27_894,  # 5 bus
+          60_840,  # 6 cyclist
     ], dtype=torch.float32)
 
-    CLASS_WEIGHTS = torch.clamp(box_counts.max() / box_counts, max=10.0)
+    CLASS_WEIGHTS = box_counts.max() / box_counts
 
-    print("\nClass weights:")
-    names = ["car", "traffic sign", "traffic light", "person", "truck", "bus", "cyclist"]
-    for name, w in zip(names, CLASS_WEIGHTS):
-        print(f"  {name:<15}: {w:.2f}x")
-
-    # ── Weighted loss ──────────────────────────────────────────────────────────
     class WeightedDetectionLoss(v8DetectionLoss):
         def __init__(self, model, tal_topk=10):
             super().__init__(model, tal_topk=tal_topk)
@@ -50,87 +43,115 @@ if __name__ == "__main__":
     DATA_YAML = "data_final.yaml"
     PROJECT   = "runs/train"
 
-    # ── Common training params ─────────────────────────────────────────────────
-    COMMON = dict(
-        trainer      = WeightedTrainer,
-        data         = DATA_YAML,
-        fraction     = 0.3,        # 30% data for quick check
-        imgsz        = 832,
-        batch        = 32,
-        optimizer    = "AdamW",
-        momentum     = 0.937,
-        weight_decay = 0.0005,
-        cos_lr       = True,
-        box          = 7.5,
-        cls          = 0.5,
-        dfl          = 1.5,
-        hsv_h        = 0.015,
-        hsv_s        = 0.7,
-        hsv_v        = 0.4,
-        fliplr       = 0.5,
-        mosaic       = 1.0,
-        mixup        = 0.15,
-        copy_paste   = 0.3,
-        project      = PROJECT,
-        save         = True,
-        plots        = True,
-        val          = True,
-        workers      = 0,          # Windows local GPU
-    )
-
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # STAGE 1 — Backbone frozen, head only trains
-    # AANKHEIN lock → DIMAGH seekhta hai 7 classes
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # ── STAGE 1: frozen backbone ──────────────────────────────────────────────
     print("\n" + "="*55)
-    print("  STAGE 1 — Backbone frozen (10 layers)")
-    print("  Truck/bus/cyclist learning class boundaries")
-    print("="*55 + "\n")
+    print("  STAGE 1 — Frozen backbone (30 epochs)")
+    print("="*55)
 
-    model = YOLO("yolo11n.pt")
+    model = YOLO("yolo11s.pt")
 
-    model.train(
-        **COMMON,
-        epochs          = 8,           # short — just warm up the head
-        freeze          = 10,          # freeze first 10 layers (backbone)
-        lr0             = 0.001,       # higher LR okay — only head training
+    results_s1 = model.train(
+        trainer         = WeightedTrainer,
+        data            = DATA_YAML,
+        epochs          = 30,
+        freeze          = 10,
+        imgsz           = 1024,
+        batch           = 32,
+        cache           = 'disk',
+
+        optimizer       = "AdamW",
+        lr0             = 0.0005,      # lower than before — more stable warmup
         lrf             = 0.1,
-        warmup_epochs   = 1,
+        momentum        = 0.937,
+        weight_decay    = 0.0005,
+        cos_lr          = True,
+
+        warmup_epochs   = 5,           # longer warmup — gentler start
         warmup_momentum = 0.8,
-        close_mosaic    = 3,
+
+        box             = 7.5,
+        cls             = 0.5,
+        dfl             = 1.5,
+
+        hsv_h           = 0.015,
+        hsv_s           = 0.5,
+        hsv_v           = 0.3,
+        fliplr          = 0.5,
+        mosaic          = 0.8,
+        mixup           = 0.05,
+        copy_paste      = 0.1,
+        close_mosaic    = 5,
+
+        patience        = 15,
+        project         = PROJECT,
+        name            = "insight3_stage1",
+        save            = True,
         save_period     = 5,
-        name            = "bdd100k_v4_stage1",
+        plots           = True,
+        val             = True,
+        workers         = 8,
+        amp             = True,
     )
 
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # STAGE 2 — Full fine-tune, low LR
-    # Sab unlock → dheere dheere BDD100K ke scenes seekhna
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    stage1_best = Path(results_s1.save_dir) / "weights" / "best.pt"
+    print(f"\n  Stage 1 complete → {stage1_best}")
+
+    # ── STAGE 2: full fine-tune ───────────────────────────────────────────────
     print("\n" + "="*55)
-    print("  STAGE 2 — Full fine-tune (all layers unlocked)")
-    print("  Low LR — car cannot dominate truck/bus anymore")
-    print("="*55 + "\n")
+    print("  STAGE 2 — Full fine-tune (150 epochs)")
+    print("="*55)
 
-    stage1_weights = f"runs/detect/{PROJECT}/bdd100k_v4_stage1/weights/best.pt"
-    model = YOLO(stage1_weights)
+    model2 = YOLO(str(stage1_best))
 
-    model.train(
-        **COMMON,
-        epochs          = 12,          # remaining epochs
-        freeze          = 0,           # unfreeze everything
-        lr0             = 0.0001,      # low LR — gentle fine-tune
+    results_s2 = model2.train(
+        trainer         = WeightedTrainer,
+        data            = DATA_YAML,
+        epochs          = 150,         # was 100
+        freeze          = 0,
+        imgsz           = 1024,
+        batch           = 32,
+        cache           = 'disk',
+
+        optimizer       = "AdamW",
+        lr0             = 0.0002,      # was 0.0005 — lower for better convergence
         lrf             = 0.01,
-        warmup_epochs   = 0,           # no warmup — already trained
+        momentum        = 0.937,
+        weight_decay    = 0.0005,
+        cos_lr          = True,
+
+        warmup_epochs   = 3,
         warmup_momentum = 0.8,
-        close_mosaic    = 5,
+
+        box             = 7.5,
+        cls             = 0.5,
+        dfl             = 1.5,
+
+        hsv_h           = 0.015,
+        hsv_s           = 0.7,
+        hsv_v           = 0.4,
+        fliplr          = 0.5,
+        mosaic          = 1.0,
+        mixup           = 0.15,
+        copy_paste      = 0.3,
+        close_mosaic    = 10,          # last 10 epochs clean
+
+        patience        = 50,          # was 30 — more patience
+        project         = PROJECT,
+        name            = "insight3_stage2",
+        save            = True,
         save_period     = 5,
-        name            = "bdd100k_v4_stage2",
+        plots           = True,
+        val             = True,
+        workers         = 8,
+        amp             = True,
     )
 
     stage2_best = Path(results_s2.save_dir) / "weights" / "best.pt"
     shutil.copy(stage2_best, "insight_final.pt")
 
     print("\n" + "="*55)
-    print("  Two-stage quick check complete!")
-    print(f"  Best model: {PROJECT}/bdd100k_v4_stage2/weights/best.pt")
+    print("  TRAINING COMPLETE")
+    print(f"  Stage 1 : {stage1_best}")
+    print(f"  Stage 2 : {stage2_best}")
+    print("  Final   : insight_final.pt")
     print("="*55)
