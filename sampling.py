@@ -1,15 +1,19 @@
 """
 sampling.py — Professional Augmentation Pipeline
 =================================================
-5 distinct augmentation techniques:
-  1. Horizontal flip — mirror scene geometry
-  2. Perspective warp — simulate different camera angle
-  3. Motion blur — camera shake or fast-moving subject
-  4. Rain simulation — adverse weather condition
-  5. CLAHE — low-light / tunnel / underexposed scene
 
-Rare classes augmented: bike + rider + bus
-Val set: 5,000 images (increased from 2,000)
+Two-tier augmentation strategy:
+
+TRULY RARE classes (low image count) → Full 5 augmentations × 1500 images
+  bike, rider, bus, truck
+
+CHALLENGING classes (high count but hard to detect) → Targeted 3 augmentations × 1500 images
+  traffic light → rain + clahe + perspective  (small objects, night conditions)
+  traffic sign  → perspective + flip + motion_blur  (varied angles, occlusion)
+  person        → rain + clahe + flip  (weather, lighting conditions)
+
+Val set: 5,000 images (clean, no augmentation)
+Total target: 60,000
 """
 
 import json
@@ -33,10 +37,24 @@ CLASSES = {
 }
 IMAGE_W, IMAGE_H = 1280, 720
 
-RARE_CLASSES  = {"bike", "rider", "bus"}
-RARE_LIMIT    = 3_000
-COMMON_LIMIT  = 4_000
-TOTAL_TARGET  = 45_000
+# ── TRULY RARE — full 5 augmentations ────────────────────────────────────────
+RARE_CLASSES = {"bike", "rider", "bus"}
+RARE_LIMIT   = 1_500   # 1500 × 6 (orig + 5 aug) = 9000 per class
+
+# ── CHALLENGING — targeted augmentations only ─────────────────────────────────
+CHALLENGING_CLASSES = {"traffic light", "traffic sign", "person", "truck"}
+CHALLENGING_LIMIT   = 1_500   # 1500 × 4 (orig + 3 aug) = 6000 per class
+
+# Targeted augmentations per challenging class
+CHALLENGING_AUGS = {
+    "traffic light": ["rain", "clahe", "perspective"],       # night/weather/angle
+    "traffic sign":  ["perspective", "flip", "motion_blur"], # angle/mirror/blur
+    "person":        ["rain", "clahe", "flip"],
+    "truck":         ["flip", "perspective", "motion_blur"],               # weather/light/mirror
+}
+
+COMMON_LIMIT  = 8_000
+TOTAL_TARGET  = 60_000
 
 BASE = "/home/aliraza/BDD-100k-dataset-training/BDD-100K-DATASET-TRAINING/archive (8)"
 
@@ -58,6 +76,8 @@ CLASS_NAMES = {
     3: "person", 4: "truck", 5: "bus", 6: "cyclist",
 }
 
+ALL_AUG_CLASSES = RARE_CLASSES | CHALLENGING_CLASSES
+
 # ── IMAGE FINDER ──────────────────────────────────────────────────────────────
 def find_image(img_name, split):
     for folder in IMAGE_FOLDERS[split]:
@@ -69,9 +89,11 @@ def find_image(img_name, split):
 # ── AUGMENTATION FUNCTIONS ────────────────────────────────────────────────────
 
 def aug_flip(img):
+    """Horizontal flip — mirror scene geometry"""
     return cv2.flip(img, 1)
 
 def aug_perspective(img):
+    """Perspective warp — simulate different camera angle/tilt"""
     h, w = img.shape[:2]
     margin = 0.05
     dx = int(w * margin)
@@ -87,6 +109,7 @@ def aug_perspective(img):
     return cv2.warpPerspective(img, M, (w, h), borderMode=cv2.BORDER_REFLECT), M
 
 def aug_motion_blur(img):
+    """Motion blur — camera shake or fast-moving object"""
     kernel_size = random.choice([11, 15, 21])
     kernel      = np.zeros((kernel_size, kernel_size))
     direction   = random.choice(["horizontal", "diagonal_lr", "diagonal_rl"])
@@ -100,6 +123,7 @@ def aug_motion_blur(img):
     return cv2.filter2D(img, -1, kernel)
 
 def aug_rain(img):
+    """Rain simulation — streaks + darkening + wet lens blur"""
     img = img.copy()
     h, w = img.shape[:2]
     img = cv2.convertScaleAbs(img, alpha=0.75, beta=0)
@@ -114,12 +138,13 @@ def aug_rain(img):
     return cv2.GaussianBlur(img, (3, 3), 0)
 
 def aug_clahe(img):
-    img   = cv2.convertScaleAbs(img, alpha=0.5, beta=0)
-    lab   = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    """CLAHE — low-light / tunnel / underexposed scene enhancement"""
+    img     = cv2.convertScaleAbs(img, alpha=0.5, beta=0)
+    lab     = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    l     = clahe.apply(l)
-    lab   = cv2.merge([l, a, b])
+    clahe   = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    l       = clahe.apply(l)
+    lab     = cv2.merge([l, a, b])
     return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
 # ── LABEL TRANSFORMS ──────────────────────────────────────────────────────────
@@ -184,6 +209,19 @@ def apply_aug(img, base_lines, aug_name):
         return aug_clahe(img), labels_unchanged(base_lines)
     return img, base_lines
 
+def save_augmented(img, base_lines, stem, ext, aug_names, out_images, out_labels, class_counter):
+    """Save original + augmented versions, return count saved"""
+    count = 0
+    for aug_name in aug_names:
+        aug_img, aug_lines = apply_aug(img.copy(), base_lines, aug_name)
+        cv2.imwrite(str(out_images / f"{stem}_{aug_name}{ext}"), aug_img)
+        with open(out_labels / f"{stem}_{aug_name}.txt", "w") as f:
+            f.write("\n".join(aug_lines))
+        for line in aug_lines:
+            class_counter[int(line.split()[0])] += 1
+        count += 1
+    return count
+
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 
 if Path("dataset_balanced").exists():
@@ -194,19 +232,28 @@ label_path = f"{BASE}/bdd100k_labels_release/bdd100k/labels/bdd100k_labels_image
 with open(label_path) as f:
     data = json.load(f)
 
-rare_images   = defaultdict(list)
-common_images = defaultdict(list)
+# Group images
+rare_images       = defaultdict(list)
+challenging_images = defaultdict(list)
+common_images     = defaultdict(list)
 
 for item in data:
     if "labels" not in item or not item["labels"]:
         continue
-    cats     = set(l["category"] for l in item["labels"] if l["category"] in CLASSES)
-    has_rare = cats & RARE_CLASSES
+    cats = set(l["category"] for l in item["labels"] if l["category"] in CLASSES)
+
+    has_rare       = cats & RARE_CLASSES
+    has_challenging = cats & CHALLENGING_CLASSES
+
     if has_rare:
         for cat in has_rare:
             rare_images[cat].append(item)
+    elif has_challenging:
+        for cat in has_challenging:
+            challenging_images[cat].append(item)
     else:
-        primary = max(cats, key=lambda c: sum(1 for l in item["labels"] if l["category"] == c)) if cats else None
+        primary = max(cats, key=lambda c: sum(
+            1 for l in item["labels"] if l["category"] == c)) if cats else None
         if primary:
             common_images[primary].append(item)
 
@@ -215,9 +262,16 @@ for cat, items in sorted(common_images.items()):
     print(f"  {cat:<20} {len(items):>6,} images")
 print(f"  {'TOTAL':<20} {sum(len(v) for v in common_images.values()):>6,}")
 
-print("\nRare class counts (before aug):")
+print("\nTRULY RARE classes (5 augmentations each):")
 for cls in RARE_CLASSES:
-    print(f"  {cls:<20} {len(rare_images[cls]):>6,} → ×6 = {min(len(rare_images[cls]),RARE_LIMIT)*6:,}")
+    count = len(rare_images[cls])
+    print(f"  {cls:<20} {count:>6,} → ×6 = {min(count, RARE_LIMIT)*6:,}")
+
+print("\nCHALLENGING classes (3 targeted augmentations each):")
+for cls in CHALLENGING_CLASSES:
+    count = len(challenging_images[cls])
+    augs  = CHALLENGING_AUGS[cls]
+    print(f"  {cls:<20} {count:>6,} → ×4 = {min(count, CHALLENGING_LIMIT)*4:,}  augs: {augs}")
 
 out_labels = Path("dataset_balanced/labels/train")
 out_images = Path("dataset_balanced/images/train")
@@ -226,17 +280,18 @@ out_images.mkdir(parents=True, exist_ok=True)
 
 saved         = 0
 class_counter = Counter()
-rare_seen     = set()
-AUG_NAMES     = ["flip", "perspective", "motion_blur", "rain", "clahe"]
+seen          = set()
+FULL_AUGS     = ["flip", "perspective", "motion_blur", "rain", "clahe"]
 
-print("\n--- Augmenting rare classes ---")
+# ── TRULY RARE — full 5 augmentations ────────────────────────────────────────
+print("\n--- Augmenting RARE classes (5 techniques) ---")
 for cat in RARE_CLASSES:
     random.shuffle(rare_images[cat])
     for item in rare_images[cat][:RARE_LIMIT]:
         img_name = item["name"]
-        if img_name in rare_seen:
+        if img_name in seen:
             continue
-        rare_seen.add(img_name)
+        seen.add(img_name)
 
         img_path = find_image(img_name, "train")
         if not img_path:
@@ -249,6 +304,7 @@ for cat in RARE_CLASSES:
         stem       = Path(img_name).stem
         ext        = Path(img_name).suffix
 
+        # Save original
         shutil.copy2(img_path, out_images / img_name)
         with open(out_labels / f"{stem}.txt", "w") as f:
             f.write("\n".join(base_lines))
@@ -256,21 +312,56 @@ for cat in RARE_CLASSES:
             class_counter[int(line.split()[0])] += 1
         saved += 1
 
-        for aug_name in AUG_NAMES:
-            aug_img, aug_lines = apply_aug(img.copy(), base_lines, aug_name)
-            cv2.imwrite(str(out_images / f"{stem}_{aug_name}{ext}"), aug_img)
-            with open(out_labels / f"{stem}_{aug_name}.txt", "w") as f:
-                f.write("\n".join(aug_lines))
-            for line in aug_lines:
-                class_counter[int(line.split()[0])] += 1
-            saved += 1
+        # Save 5 augmented versions
+        saved += save_augmented(img, base_lines, stem, ext,
+                                FULL_AUGS, out_images, out_labels, class_counter)
 
-        if saved % 1000 == 0:
+        if saved % 2000 == 0:
             print(f"  [rare] {saved:,} saved...")
 
-print(f"\nAfter rare augmentation: {saved:,} images")
+print(f"  After rare: {saved:,} images")
 
-print("\n--- Adding common class images ---")
+# ── CHALLENGING — targeted augmentations ─────────────────────────────────────
+print("\n--- Augmenting CHALLENGING classes (3 targeted techniques) ---")
+for cat in CHALLENGING_CLASSES:
+    aug_names = CHALLENGING_AUGS[cat]
+    random.shuffle(challenging_images[cat])
+    for item in challenging_images[cat][:CHALLENGING_LIMIT]:
+        img_name = item["name"]
+        if img_name in seen:
+            continue
+        seen.add(img_name)
+
+        img_path = find_image(img_name, "train")
+        if not img_path:
+            continue
+        img = cv2.imread(img_path)
+        if img is None:
+            continue
+
+        base_lines = item_to_label_lines(item)
+        stem       = Path(img_name).stem
+        ext        = Path(img_name).suffix
+
+        # Save original
+        shutil.copy2(img_path, out_images / img_name)
+        with open(out_labels / f"{stem}.txt", "w") as f:
+            f.write("\n".join(base_lines))
+        for line in base_lines:
+            class_counter[int(line.split()[0])] += 1
+        saved += 1
+
+        # Save 3 targeted augmented versions
+        saved += save_augmented(img, base_lines, stem, ext,
+                                aug_names, out_images, out_labels, class_counter)
+
+        if saved % 2000 == 0:
+            print(f"  [challenging] {saved:,} saved...")
+
+print(f"  After challenging: {saved:,} images")
+
+# ── COMMON — fill to TOTAL_TARGET ────────────────────────────────────────────
+print("\n--- Adding common class images (car + truck) ---")
 all_common = []
 for cat, items in common_images.items():
     random.shuffle(items)
@@ -282,7 +373,7 @@ for item in all_common:
     if saved >= TOTAL_TARGET:
         break
     img_name = item["name"]
-    if img_name in seen_common or img_name in rare_seen:
+    if img_name in seen_common or img_name in seen:
         continue
     seen_common.add(img_name)
 
@@ -298,6 +389,7 @@ for item in all_common:
         class_counter[int(line.split()[0])] += 1
     saved += 1
 
+# ── TRAIN REPORT ──────────────────────────────────────────────────────────────
 print(f"\n{'='*42}")
 print(f"  TRAIN FINAL: {saved:,} images")
 print(f"{'='*42}")
@@ -306,8 +398,8 @@ print(f"  {'-'*37}")
 for cid in range(7):
     print(f"  {CLASS_NAMES[cid]:<25} {class_counter.get(cid,0):>10,}")
 
-# ── VAL — increased to 5,000 ──────────────────────────────────────────────────
-print("\n--- Processing val (5,000 images — increased from 2,000) ---")
+# ── VAL (clean, no augmentation) ─────────────────────────────────────────────
+print("\n--- Processing val (5,000 images) ---")
 val_label_path = f"{BASE}/bdd100k_labels_release/bdd100k/labels/bdd100k_labels_images_val_cleaned.json"
 with open(val_label_path) as f:
     val_data = json.load(f)
@@ -322,7 +414,7 @@ val_saved   = 0
 val_counter = Counter()
 
 for item in val_data:
-    if val_saved >= 5_000:    # increased from 2,000
+    if val_saved >= 5_000:
         break
     img_name = item["name"]
     img_path = find_image(img_name, "val")

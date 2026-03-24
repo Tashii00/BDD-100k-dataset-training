@@ -8,16 +8,16 @@ if __name__ == "__main__":
     from ultralytics.models.yolo.detect import DetectionTrainer
     from ultralytics.utils.loss import v8DetectionLoss
 
+    
     box_counts = torch.tensor([
-         150_000,  # 0 car
-         100_000,  # 1 traffic sign
-         100_000,  # 2 traffic light
-         100_000,  # 3 person
-          24_601,  # 4 truck
-          27_894,  # 5 bus
-          60_840,  # 6 cyclist
+    417_942,  # 0 car
+    164_776,  # 1 traffic sign
+    149_362,  # 2 traffic light
+    125_100,  # 3 person
+     29_144,  # 4 truck
+     15_066,  # 5 bus
+     37_230,  # 6 cyclist
     ], dtype=torch.float32)
-
     CLASS_WEIGHTS = box_counts.max() / box_counts
 
     class WeightedDetectionLoss(v8DetectionLoss):
@@ -84,7 +84,7 @@ if __name__ == "__main__":
 
         patience        = 15,
         project         = PROJECT,
-        name            = "insight3_stage1",
+        name            = "insight7_stage1_smodel",
         save            = True,
         save_period     = 5,
         plots           = True,
@@ -106,17 +106,17 @@ if __name__ == "__main__":
     results_s2 = model2.train(
         trainer         = WeightedTrainer,
         data            = DATA_YAML,
-        epochs          = 150,         # was 100
+        epochs          = 100,         # was 100
         freeze          = 0,
         imgsz           = 1024,
         batch           = 32,
         cache           = 'disk',
 
         optimizer       = "AdamW",
-        lr0             = 0.0002,      # was 0.0005 — lower for better convergence
+        lr0             = 0.0001,      # was 0.0005 — lower for better convergence
         lrf             = 0.01,
         momentum        = 0.937,
-        weight_decay    = 0.0005,
+        weight_decay    = 0.0001,
         cos_lr          = True,
 
         warmup_epochs   = 3,
@@ -135,9 +135,9 @@ if __name__ == "__main__":
         copy_paste      = 0.3,
         close_mosaic    = 10,          # last 10 epochs clean
 
-        patience        = 50,          # was 30 — more patience
+        patience        = 20,          # was 30 — more patience
         project         = PROJECT,
-        name            = "insight3_stage2",
+        name            = "insight7_stage2_smodel",
         save            = True,
         save_period     = 5,
         plots           = True,
