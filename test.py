@@ -1,3 +1,10 @@
+# INT8 quantized YOLOv11n model — exported from FP32 best.pt using OpenVINO NNCF calibration.
+# Model size reduced from 5.4MB (FP32) to 3.2MB (INT8), ~2x faster inference on CPU.
+# Trained on BDD100K dataset, 7 classes: car, traffic sign, traffic light, person, truck, bus, cyclist.
+# Tested on real Pakistan road conditions — Islamabad/Rawalpindi.
+
+
+
 import cv2
 import numpy as np
 from pathlib import Path
